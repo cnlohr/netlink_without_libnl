@@ -10,6 +10,8 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
+#include "netlink_names.h"
+#include <linux/nl80211.h>	 //NL80211 definitions
 
 int nl_seqno;
 int nl_pid;
@@ -22,19 +24,17 @@ int ReadNL()
 {
 	int len;
 	char buf[32768];
-	struct iovec iov = { buf, sizeof(buf) };
-	struct nlmsghdr *nh = alloca(32768);
-	struct msghdr msg = { &nl_sanl, sizeof(nl_sanl), &iov, 1, NULL, 0, 0 };
-	len = recvmsg( nl_socket, &msg, 0 );
+	struct nlmsghdr *nh;
+	len = recv( nl_socket, buf, sizeof(buf), MSG_NOSIGNAL );
 
 	for( nh = (struct nlmsghdr *) buf; NLMSG_OK( nh, len ); nh = NLMSG_NEXT( nh, len ) )
 	{
-		/* The end of multipart message. */
+		printf( "TYPE: %d (%ld) %d\n", nh->nlmsg_type, ((char*)nh)-buf, len );
 		switch( nh->nlmsg_type )
 		{
-		case NLMSG_DONE:
-			return 1;
-		case NLMSG_ERROR:
+		case NLMSG_DONE:  // TYPE 3
+			return 0;
+		case NLMSG_ERROR: // TYPE 2
 			return 0;
 		case 0x10:
 			// Control Message
@@ -51,18 +51,55 @@ int ReadNL()
 			}
 			break;
 		case 0x1f:
-			printf( "NL80211 Reply\n" );
-			if( 1 )
+		{
+			uint8_t * nlm = (uint8_t*)(nh+1);
+			uint8_t * nlmend = nlm + nh->nlmsg_len;
+			nlm += 4; // Not sure what the first 4 bytes are (07 01 00 00)
+			printf( "NL80211 Reply (%d)\n", nh->nlmsg_len );
+
+			if( 0 )
 			{
-				uint8_t * nlm = (uint8_t*)(nh+1);
+				uint8_t * nlml = (uint8_t*)(nh+0);
 				int i;
-				for( i = 0; i < nh->nlmsg_len; i++ )
+				for( i = 0; i < len; i++ )
 				{
-					printf( "%02x%c", nlm[i], ((i&0x1f)!=0x1f)?' ':'\n' );
+					if( (i & 0x1f) == 0 )
+					{
+						printf( "%04x: ", i );
+					}
+					printf( "%02x(%c)%c", nlml[i], (nlml[i]>=' ' && nlm[i]<0x80)?nlml[i]:' ', ((i&0x1f)!=0x1f)?' ':'\n' );
+
 				}
 				printf( "\n" );
 			}
-			return 0;
+
+			do
+			{
+				int msglen = ((uint16_t*)nlm)[0];
+				if( msglen == 0 ) break;
+				int msglenbuf = (msglen+3)&0xfffc; //All messages are padded.
+				switch( nlm[2] )
+				{
+				case NL80211_ATTR_IFNAME:
+					printf( "    IFName: %s\n", nlm + 4 );
+					break;
+				case NL80211_ATTR_SSID:
+					printf( "    SSDID: %s\n", nlm + 4 );
+					break;
+				case NL80211_ATTR_WIPHY_FREQ:
+					printf( "    Frequency: %d\n", *((uint32_t*)(nlm + 4)) );
+					break;
+				case NL80211_ATTR_CHANNEL_WIDTH:
+					printf( "    Channel Width: %d\n", *((uint32_t*)(nlm + 4)) );
+					break;
+				default:
+					printf( "    %s: %d: %02x%02x%02x%02x\n", attrnames[nlm[2]], msglen-4, nlm[4], nlm[5], nlm[6], nlm[7] );
+					break;
+				}
+				nlm += msglenbuf;
+				//printf( "%d (%p %p)\n", msglen, nlm, nlmend );
+			} while( nlm < nlmend );
+		}
 		default:
 			printf( "MSG: %d / %d\n", nh->nlmsg_type, nh->nlmsg_len );
 			break;
@@ -103,13 +140,9 @@ int SetupNL()
 			fprintf( stderr, "Error: Could not bind netlink socket.\n" );
 			return -5;
 		}
-
-		// Probably not needed - but in libnl.
-		//int rlen = sizeof( nl_sanl );
-		//getsockname( nl_socket, (struct sockaddr *)&nl_sanl, &rlen );
 	}
 
-    struct nlmsghdr *nh = alloca(32);
+	struct nlmsghdr *nh = alloca(32);
 	nh->nlmsg_pid = nl_pid;
 	nh->nlmsg_seq = ++nl_seqno;
 	nh->nlmsg_flags = NLM_F_REQUEST|NLM_F_ACK;   	// Request an ack from kernel by setting NLM_F_ACK.
@@ -117,22 +150,15 @@ int SetupNL()
 	nh->nlmsg_len = 32;
 	uint8_t * nh_buffer = (uint8_t*)(nh+1); 		// Buffer is after header
 
-	// Gotta be honnest.  Not sure what this is.
+	// Request an 80211 interface.
 	memcpy( nh_buffer, "\x03\x01\x00\x00\x0c\x00\x02\x00nl80211\x00", 16 );
 
-    struct iovec iov = { nh, nh->nlmsg_len };
-    struct msghdr msg = { &nl_sanl, sizeof(nl_sanl), &iov, 1, NULL, 0, 0 };
-	sendmsg( nl_socket, &msg, 0 );
-
-//	sendmsg(3, {msg_name={sa_family=AF_NETLINK, nl_pid=0, nl_groups=00000000}, msg_namelen=12, msg_iov=[{iov_base={{len=32, type=nlctrl, flags=NLM_F_REQUEST|NLM_F_ACK, seq=1653720725, pid=2080396848}, "\x03\x01\x00\x00\x0c\x00\x02\x00nl80211\x00"}, iov_len=32}], msg_iovlen=1, msg_controllen=0, msg_flags=0}, 0) = 32
-//	sendmsg(3, {msg_name={sa_family=AF_NETLINK, nl_pid=0, nl_groups=00000000}, msg_namelen=12, msg_iov=[{iov_base={{len=32, type=nlctrl, flags=NLM_F_REQUEST|NLM_F_ACK, seq=1, pid=2080403945}, "\x20\x9f\x6f\xb6\xfe\x7f\x00\x00\x20\x00\x00\x00\x00\x00\x00\x00"}, iov_len=32}], msg_iovlen=1, msg_controllen=0, msg_flags=0}, 0) = 32
+	send( nl_socket, nh, nh->nlmsg_len, MSG_NOSIGNAL );
 
 	while( ReadNL() );
 
 	return 0;
 }
-
-
 
 int main()
 {
@@ -141,30 +167,20 @@ int main()
 		return -1;
 	}
 
-
-
-    struct nlmsghdr *nh = alloca(16+4);
+	struct nlmsghdr *nh = alloca(16+4);
 	nh->nlmsg_pid = nl_pid;
 	nh->nlmsg_seq = ++nl_seqno;
 	nh->nlmsg_flags = NLM_F_REQUEST|NLM_F_ACK|0x300;   	// Request an ack from kernel by setting NLM_F_ACK.
 	nh->nlmsg_type = nl_80211_type; //nlctrl
 	nh->nlmsg_len = 16+4;
-	uint8_t * nh_buffer = (uint8_t*)(nh+1); 		// Buffer is after header
+	uint32_t * command = (uint32_t*)(nh+1); 		// Buffer is after header
 
-	// Gotta be honnest.  Not sure what this is.
-	memcpy( nh_buffer, "\x05\x00\x00\x00", 4 );
+	// Code for requesting status.
+	*command = NL80211_CMD_GET_INTERFACE;
 
-
-    struct iovec iov = { nh, nh->nlmsg_len };
-    struct msghdr msg = { &nl_sanl, sizeof(nl_sanl), &iov, 1, NULL, 0, 0 };
-	sendmsg( nl_socket, &msg, 0 );
+	send( nl_socket, nh, 16+4, MSG_NOSIGNAL );
 
 	while( ReadNL() );
-//sendmsg(3, {msg_name={sa_family=AF_NETLINK, nl_pid=0, nl_groups=00000000}, msg_namelen=12, msg_iov=[{iov_base={{len=20, type=nl80211, flags=NLM_F_REQUEST|NLM_F_ACK|0x300, seq=2, pid=2080406493}, "\x05\x00\x00\x00"}, iov_len=20}], msg_iovlen=1, msg_controllen=0, msg_flags=0}, 0) = 20
-//sendmsg(3, {msg_name={sa_family=AF_NETLINK, nl_pid=0, nl_groups=00000000}, msg_namelen=12, msg_iov=[{iov_base={{len=20, type=nl80211, flags=NLM_F_REQUEST|NLM_F_ACK|0x300, seq=1653728605, pid=2512419777}, "\x05\x00\x00\x00"}, iov_len=20}], msg_iovlen=1, msg_controllen=0, msg_flags=0}, 0) = 20
-
-
-
 
 	printf( "\n" );
 	return 0;
