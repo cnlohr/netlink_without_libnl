@@ -16,79 +16,80 @@
 int nl_seqno;
 int nl_pid;
 int nl_socket;
-int nl_80211_type = -1; // Normally 0x1f
+int nl_80211_type = -1;
 struct sockaddr_nl nl_sanl = { 0 };
-#define NL80211_MESSAGE_TYPE 0x1f
 
 int ReadNL()
 {
 	int len;
 	char buf[32768];
 	struct nlmsghdr *nh;
-	len = recv( nl_socket, buf, sizeof(buf), MSG_NOSIGNAL );
+	int is_first = 1;
 
-	for( nh = (struct nlmsghdr *) buf; NLMSG_OK( nh, len ); nh = NLMSG_NEXT( nh, len ) )
+	while( 1 )
 	{
-		printf( "TYPE: %d (%ld) %d\n", nh->nlmsg_type, ((char*)nh)-buf, len );
+		// Make sure we clear out the buffer for subsequent calls.
+		len = recv( nl_socket, buf, sizeof(buf), MSG_NOSIGNAL | (is_first?0:MSG_DONTWAIT) );
+		is_first = 0;
+		if( len <= 0 ) break;
 
-		switch( nh->nlmsg_type )
+		for( nh = (struct nlmsghdr *) buf; NLMSG_OK( nh, len ); nh = NLMSG_NEXT( nh, len ) )
 		{
-		case NLMSG_DONE:  // TYPE 3
-			return 0;
-		case NLMSG_ERROR: // TYPE 2
-			return 0;
-		default:
-		{
-			uint8_t * nlm = (uint8_t*)(nh+1);
-			uint8_t * nlmend = nlm + nh->nlmsg_len;
-			nlm += 4; // Not sure what the first 4 bytes are (07 01 00 00)
-			printf( "NL80211 Reply (%d)\n", nh->nlmsg_len );
-
-			printf( "MSG: %d / %d\n", nh->nlmsg_type, nh->nlmsg_len );
-
-			do
+			switch( nh->nlmsg_type )
 			{
-				int msglen = ((uint16_t*)nlm)[0];
-				if( msglen == 0 ) break;
-				int msglenbuf = (msglen+3)&0xfffc; //All messages are padded.
-				int type = nlm[2];
-				if( nh->nlmsg_type == 0x10 )
+			case NLMSG_DONE:  // TYPE 3
+				break;
+			case NLMSG_ERROR: // TYPE 2
+				break;
+			default:
+			{
+				uint8_t * nlm = (uint8_t*)(nh+1);
+				uint8_t * nlmend = nlm + nh->nlmsg_len;
+				nlm += 4; // Not sure what the first 4 bytes are (07 01 00 00)
+				printf( "Netlink Reply: Type: %d  Length: %d\n", nh->nlmsg_type, nh->nlmsg_len );
+				do
 				{
-						printf( "   CONTROL: %d:%d: %02x%02x%02x%02x\n", nlm[2], msglen-4, nlm[4], nlm[5], nlm[6], nlm[7] );
-						if( type == 1 )
-						{
-							nl_80211_type = *((uint32_t*)(nlm + 4));
-							printf( "Got nl80211 type %d\n", nl_80211_type );
-						}
-				}
-				else
-				{
-					switch( type )
+					int msglen = ((uint16_t*)nlm)[0];
+					if( msglen == 0 ) break;
+					int msglenbuf = (msglen+3)&0xfffc; //All messages are padded.
+					int type = nlm[2];
+					if( nh->nlmsg_type == 0x10 )
 					{
-					case NL80211_ATTR_IFNAME:
-						printf( "    IFName: %s\n", nlm + 4 );
-						break;
-					case NL80211_ATTR_SSID:
-						printf( "    SSDID: %s\n", nlm + 4 );
-						break;
-					case NL80211_ATTR_WIPHY_FREQ:
-						printf( "    Frequency: %d\n", *((uint32_t*)(nlm + 4)) );
-						break;
-					case NL80211_ATTR_CHANNEL_WIDTH:
-						printf( "    Channel Width: %d\n", *((uint32_t*)(nlm + 4)) );
-						break;
-					default:
-						printf( "    %s: %d: %02x%02x%02x%02x\n", attrnames[type], msglen-4, nlm[4], nlm[5], nlm[6], nlm[7] );
-						break;
+							printf( "    CONTROL: %d:%d: %02x%02x%02x%02x\n", nlm[2], msglen-4, nlm[4], nlm[5], nlm[6], nlm[7] );
+							if( type == 1 )
+							{
+								nl_80211_type = *((uint32_t*)(nlm + 4));
+								printf( "Got nl80211 type %d\n", nl_80211_type );
+							}
 					}
-				}
-				nlm += msglenbuf;
-				//printf( "%d (%p %p)\n", msglen, nlm, nlmend );
-			} while( nlm < nlmend );
-		}
+					else
+					{
+						switch( type )
+						{
+						case NL80211_ATTR_IFNAME:
+							printf( "    ****IFName: %s\n", nlm + 4 );
+							break;
+						case NL80211_ATTR_SSID:
+							printf( "    ****SSDID: %s\n", nlm + 4 );
+							break;
+						case NL80211_ATTR_WIPHY_FREQ:
+							printf( "    ****Frequency: %d\n", *((uint32_t*)(nlm + 4)) );
+							break;
+						case NL80211_ATTR_CHANNEL_WIDTH:
+							printf( "    ****Channel Width: %d\n", *((uint32_t*)(nlm + 4)) );
+							break;
+						default:
+							printf( "    %s: %d: %02x%02x%02x%02x\n", attrnames[type], msglen-4, nlm[4], nlm[5], nlm[6], nlm[7] );
+							break;
+						}
+					}
+					nlm += msglenbuf;
+					//printf( "%d (%p %p)\n", msglen, nlm, nlmend );
+				} while( nlm < nlmend );
+			}
+			}
 		}
 	}
-
 	return 1;
 }
 
@@ -138,7 +139,7 @@ int SetupNL()
 
 	send( nl_socket, nh, nh->nlmsg_len, MSG_NOSIGNAL );
 
-	while( ReadNL() );
+	ReadNL();
 
 
 	if( nl_80211_type < 0 )
@@ -171,7 +172,7 @@ int main()
 
 	send( nl_socket, nh, 16+4, MSG_NOSIGNAL );
 
-	while( ReadNL() );
+	ReadNL();
 
 	printf( "\n" );
 	return 0;
